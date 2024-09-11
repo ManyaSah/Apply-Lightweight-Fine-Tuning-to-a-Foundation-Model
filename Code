@@ -1,0 +1,72 @@
+from peft import LoraConfig,get_peft_model
+from transformers import AutoTokenizer,AutoModelForCausalLM,Trainer,TrainingArguments,DataCollatorWithPadding,AutoModelForSequenceClassification
+from datasets import load_dataset
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+import numpy as np
+import torch.nn as nn
+import torch
+from datasets import load_dataset
+
+splits = ["train", "test"]
+ds ={split: ds for split,ds in zip(splits, load_dataset("emotion",split=splits))}
+for split in splits:
+    ds[split]=ds[split].shuffle(seed=42).select(range(500))
+
+tokensizer = AutoTokenizer.from_pretrained("gpt2")
+tokenised_ds = {}
+def tokenize_function(examples):
+    # Tokenize the input text
+    tokens = tokensizer(examples["text"], truncation=True)
+    
+    # Map the 'label' field to 'labels' as expected by the Trainer
+    tokens["labels"] = examples["label"]
+    
+    return tokens
+
+# Tokenize the dataset and ensure 'labels' is included
+tokenised_ds = {}
+for split in splits:
+    tokenised_ds[split] = ds[split].map(tokenize_function, batched=True)
+
+tokenised_ds["train"] = tokenised_ds["train"].shuffle(seed=42)
+
+model_name = "gpt2"
+base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=6)
+
+# Create a LoRA config to target the output layer for classification
+config = LoraConfig()
+
+# Wrap the model using LoRA
+lora_model = get_peft_model(base_model, config)
+for params in lora_model.base_model.parameters():
+    params.requires_grad = False
+lora_model
+
+def compute_metrics(eval_pred):
+    predictions, labels = eval_pred
+    predictions = np.argmax(predictions, axis=1)
+    accuracy = (predictions==labels).astype(float).mean()
+
+    return {"accuracy": accuracy}
+
+trainer = Trainer(
+    model=lora_model,
+    args=TrainingArguments(
+        output_dir="./data/sentiment_analysis",
+        learning_rate=2e-3,
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=4,
+        num_train_epochs=2,
+        weight_decay=0.01,
+        evaluation_strategy="epoch",
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+    ),
+    train_dataset=tokenised_ds["train"],
+    eval_dataset=tokenised_ds["test"],
+    tokenizer=tokensizer,
+    data_collator=DataCollatorWithPadding(tokenizer = tokensizer),
+    compute_metrics=compute_metrics,
+)
+
+trainer.train()
